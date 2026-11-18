@@ -19,7 +19,7 @@ program makes no network call and uses only the standard library):
   fit would badly under-predict a huge launch's evening. The median therefore
   blends two local estimates of the log-ratio at each hour:
 
-    * the median of the 8 comparables nearest in ln(hour-1 print), and
+    * the median of the 12 comparables nearest in ln(hour-1 print), and
     * a binned fit: comparables split into 8 quantile bins by ln(hour-1
       print), each bin's median log-ratio, linearly interpolated between bin
       centres and flat outside them (saturation, no extrapolation).
@@ -33,11 +33,16 @@ program makes no network call and uses only the standard library):
   comparables unlocked globally at one time or gave early access, which
   inflates their hour 1 and flattens their day. So the same blend is also
   computed on the console-only cohort (comparables whose platforms list no
-  PC), and the two medians are averaged in log space (0.6 full pool,
-  0.4 console-only).
+  PC), and the two medians are averaged in log space (0.9 full pool,
+  0.1 console-only). The console pool is small and its launches are much
+  smaller than a record launch, so its median over-predicts a huge launch's
+  evening rise; the full pool holds the biggest launches (ELDEN RING,
+  Cyberpunk 2077, Diablo IV), which are the right analogues for one. The
+  0.9 weight keeps a small console hedge without letting it drag the
+  forecast.
 
   The spread is empirical: the quantiles of the log-ratios over the union of
-  the 12 nearest full-pool neighbours and the 8 nearest console-only ones,
+  the 8 nearest full-pool neighbours and the 8 nearest console-only ones,
   centred on the ensemble median and shrunk by 0.85 (the raw extremes of a
   small neighbour set are noisy). The result is honest about the one thing
   the data cannot pin down -- how far a record launch's evening rises.
@@ -49,7 +54,14 @@ program makes no network call and uses only the standard library):
   Practice (four past launches, scored locally against SullyGnome's hourly
   averages, the same source the house grades on): pinball loss 0.185, versus
   0.387 for the persistence baseline -- a 52% cut. Typical miss about 33%,
-  90% coverage about 0.87.
+  90% coverage about 0.87. That was round 1 (8 nearest, 0.6/0.4 blend,
+  12-neighbour spread). Round 2 retuned the three knobs by leave-one-out
+  validation over the 37 usable comparables -- forecast each comparable's
+  day from its hour-1 print using the other 36, score against its real
+  hours 2-24: LOO loss 0.406 against 0.425 for round 1, and 0.167 against
+  0.187 on the eight largest launches, the regime the final case lives in.
+  The spread shrink stays 0.85: widening it lifts coverage toward 0.90 but
+  costs more pinball loss on the big launches than it saves.
 """
 
 import json
@@ -67,12 +79,12 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 SIGMA = 0.15  # fallback spread only, in log units per square-root hour
 
-K_MED_FULL = 8    # neighbours for the full-pool median
+K_MED_FULL = 12   # neighbours for the full-pool median
 K_MED_CONSOLE = 5  # neighbours for the console-only median
-K_SPR_FULL = 12   # neighbours for the spread, full pool
+K_SPR_FULL = 8    # neighbours for the spread, full pool
 K_SPR_CONSOLE = 8  # neighbours for the spread, console-only pool
 N_BINS = 8        # quantile bins of ln(hour-1) for the binned fit
-W_FULL = 0.6      # ensemble weight on the full-pool median
+W_FULL = 0.9      # ensemble weight on the full-pool median
 SPREAD_SCALE = 0.85  # shrink the empirical spread (small-sample extremes)
 MIN_COMPARABLES = 5  # below this, fall back to persistence
 
