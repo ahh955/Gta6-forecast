@@ -62,6 +62,23 @@ program makes no network call and uses only the standard library):
   0.187 on the eight largest launches, the regime the final case lives in.
   The spread shrink stays 0.85: widening it lifts coverage toward 0.90 but
   costs more pinball loss on the big launches than it saves.
+
+  Round 3 adds a leave-one-out bias correction to the median. Per-hour
+  diagnostics on the eight largest LOO folds showed the median is
+  systematically biased: it under-predicts hours 2-5 (+0.08 to +0.14 in log
+  units) and over-predicts hours 6-24 (-0.04 to -0.17), because the
+  neighbours of a huge launch include smaller launches that rose further.
+  At run time, for each hour, the correction is the (shrunk) median of the
+  LOO residuals of the 16 comparables nearest the target's hour-1 size --
+  each neighbour's real log-ratio minus the median the estimator would have
+  forecast for it from the other comparables -- so it is size-adaptive and
+  computed from the case's own pool. The spread shrink drops to 0.80: on the
+  big-launch folds that puts 90% coverage at 0.89 (the target), where 0.85
+  over-covered at 0.92. LOO: overall 0.403 against 0.406 for round 2, and
+  0.157 against 0.167 on the eight largest launches (0.125 against 0.139 on
+  the clean ones). Tier filtering was tested and rejected: dropping the
+  early-access-contaminated comparables (Diablo IV, Hogwarts Legacy) costs
+  the big-launch analogues and worsens every LOO metric.
 """
 
 import json
@@ -85,7 +102,9 @@ K_SPR_FULL = 8    # neighbours for the spread, full pool
 K_SPR_CONSOLE = 8  # neighbours for the spread, console-only pool
 N_BINS = 8        # quantile bins of ln(hour-1) for the binned fit
 W_FULL = 0.9      # ensemble weight on the full-pool median
-SPREAD_SCALE = 0.85  # shrink the empirical spread (small-sample extremes)
+SPREAD_SCALE = 0.8   # shrink the empirical spread (small-sample extremes)
+BIAS_K = 16       # neighbours for the LOO bias correction (0 = off)
+BIAS_SHRINK = 0.75  # shrink the bias correction toward 0
 MIN_COMPARABLES = 5  # below this, fall back to persistence
 
 
@@ -253,6 +272,42 @@ def console_pool_median(comps, log_p1, hour):
     return (1 - w) * knn_med + w * (intercept + slope * clamped)
 
 
+def median_forecast(comps, console, log_p1, hour):
+    """The ensemble median log-ratio (full pool + console blend) for one hour."""
+    med_full = full_pool_median(comps, log_p1, hour)
+    if console and len(console) >= 3:
+        med_console = console_pool_median(console, log_p1, hour)
+        return W_FULL * med_full + (1 - W_FULL) * med_console
+    return med_full
+
+
+def bias_correction(comps, console, log_p1):
+    """Per-hour median bias of the ensemble median, from leave-one-out
+    residuals of the BIAS_K comparables nearest the target's hour-1 size.
+
+    The median estimator is systematically off at a given launch size (for
+    huge launches it over-predicts the evening rise: the neighbours include
+    smaller launches that rose further). Each neighbour's residual is its
+    real log-ratio minus the median the estimator would have forecast for
+    it from the other comparables, so the correction is an honest,
+    size-adaptive estimate of the bias -- and it is computed from the case's
+    own comparables at run time, so it adapts to the final case's pool.
+    """
+    near = nearest(comps, log_p1, BIAS_K)
+    corr = {}
+    for hour in range(2, 25):
+        res = []
+        for name, h1, ratios in near:
+            if hour not in ratios:
+                continue
+            rest = [c for c in comps if c[0] != name]
+            rest_console = [c for c in console if c[0] != name]
+            pred = median_forecast(rest, rest_console, math.log(h1), hour)
+            res.append(ratios[hour] - pred)
+        corr[hour] = median(res) * BIAS_SHRINK if res else 0.0
+    return corr
+
+
 def normal_quantile(p):
     """Inverse standard normal CDF (Acklam's approximation, ~1e-9 accurate)."""
     a = [-3.969683028665376e+01, 2.209460984245205e+02,
@@ -315,15 +370,12 @@ def forecast_case(case, name):
     use_console = len(console) >= 3
     full_sorted = sorted(comps, key=lambda c: (abs(math.log(c[1]) - log_p1), c[0]))
     console_sorted = sorted(console, key=lambda c: (abs(math.log(c[1]) - log_p1), c[0])) if use_console else []
+    corr = bias_correction(comps, console if use_console else [], log_p1) if BIAS_K else {}
 
     rows = []
     for hour in hours:
-        med_full = full_pool_median(comps, log_p1, hour)
-        if use_console:
-            med_console = console_pool_median(console, log_p1, hour)
-            centre = W_FULL * med_full + (1 - W_FULL) * med_console
-        else:
-            centre = med_full
+        centre = median_forecast(comps, console if use_console else [], log_p1, hour)
+        centre += corr.get(hour, 0.0)
         # Spread: empirical quantiles over the union of both neighbour pools.
         pool = {}
         for item in full_sorted[:K_SPR_FULL] + console_sorted[:K_SPR_CONSOLE]:
